@@ -1,0 +1,59 @@
+# HWP Exporter
+
+마크다운 노트를 한글(HWPX) 문서로 내보내는 옵시디언 플러그인입니다. 결과물의 모양은 한글에서 고칠 수 있는 HWPX 템플릿이 정합니다. AI 에이전트 플러그인이 내보내기를 점검하고 실행할 수 있는 MCP-like API도 제공합니다.
+
+## 특징
+
+- **마크다운 → HWPX**: 제목, 문단, 굵게·기울임·취소선·하이라이트, 링크, 목록(중첩·번호·할 일), 표(정렬·열 너비), 코드 블록, 인용과 옵시디언 콜아웃, 한글 고유 각주, 그림과 `![[embed]]`, 인라인 `$수식$`, 수평선, 프런트매터.
+- **템플릿 기반 서식 지정**: `.hwpx` 템플릿 안의 `{{H1}}`, `{{BODY}}`, `{{QUOTE}}` 같은 표시가 있는 자리의 글자·문단 모양을 노트의 같은 요소에 적용합니다. 디자인은 플러그인이 아니라 템플릿에 있습니다.
+- **동봉 템플릿 9종**: 모든 표시가 든 견본 템플릿, 한글 템플릿, KORDOC 보고서 양식, 인기 테마 6종(Obsidian 기본, Minimal, Things, AnuPpuccin, Blue Topaz, Primary)을 옮긴 템플릿.
+- **템플릿 작성 가이드**: 템플릿 옆에 `HWPX 템플릿 작성 가이드` 노트가 함께 설치됩니다.
+- **템플릿 검사**: 템플릿이 정의한 표시, 오타로 보이는 표시, 기본 모양으로 그릴 요소를 보여 줍니다.
+- **렌더 블록 캡처**: Mermaid 도표와 SVG 파일을 그림으로 넣습니다. 다른 플러그인의 코드 블록 렌더러는 선택 사항입니다.
+- **AI 에이전트 플러그인용 API**: agentinterop v1 provider(아래).
+
+## 시작하기
+
+1. 플러그인을 켜면 처음 한 번 Vault에 `HWPX templates` 폴더를 만들고 동봉 템플릿과 템플릿 작성 가이드를 넣은 뒤, 설정의 템플릿 폴더로 지정합니다. 이미 있는 파일은 덮어쓰지 않습니다.
+2. 노트를 열고 명령 팔레트에서 **Export current note to HWPX**를 실행하거나, 노트·폴더를 오른쪽 클릭해 **Export to HWPX**를 고릅니다.
+3. `.hwpx` 파일이 노트 옆(또는 지정한 폴더)에 만들어지고 기본 앱(보통 한글)으로 열립니다.
+
+동봉 템플릿을 다시 넣거나 다른 폴더에 설치하려면 **Install bundled templates** 명령 또는 설정의 버튼을 씁니다.
+
+## 템플릿 만들기
+
+`견본 템플릿.hwpx`를 복사해 한글에서 열고, 각 표시의 서식을 바꾼 뒤 템플릿 폴더에 다른 이름으로 저장합니다. 표시와 옵션은 함께 설치되는 `HWPX 템플릿 작성 가이드`에 정리되어 있습니다. 고친 뒤에는 **Inspect HWPX template**으로 검사합니다.
+
+## AI 에이전트 플러그인용 API
+
+플러그인 인스턴스에 agentinterop v1 provider가 있어, 호환되는 에이전트 호스트가 도구 정의를 읽고 호출할 수 있습니다(호스트에서 사용자가 승인해야 모델에 보입니다).
+
+- `get_export_options`: 쓸 수 있는 템플릿, 저장 위치·이름 규칙, 캡처 설정.
+- `check_export`: OS 임시 폴더에서 시험 변환해 저장 경로, 노트 구성, 넣을 수 없는 그림, 캡처될 코드 블록을 알려 줍니다. Vault에는 아무것도 쓰지 않습니다.
+- `export_note`: 노트를 새 `.hwpx` 파일로 내보냅니다. commit 도구라서 호스트가 만들 파일을 보여 주고 사람의 승인을 받은 뒤에만 씁니다. 기존 파일을 덮어쓰지 않고 숨김 폴더에 쓰지 않습니다.
+
+### agentinterop v1 provider란
+
+agentinterop v1 provider는 AI 에이전트 기능을 수행하는 다른 옵시디언 플러그인에서 MCP-like API를 제공하는 개발자 자체 규약으로, 공인된 표준은 아닙니다. 특정 에이전트 호스트를 몰라도, 에이전트를 실행하는 플러그인이 다른 플러그인의 도구를 찾아 쓸 수 있게 하려는 것입니다.
+
+- 플러그인 인스턴스의 `Symbol.for('dev.agentinterop.capability-provider')` 키에 provider를 둡니다. provider는 `protocol: 'agentinterop'`, `protocolVersion: 1`, `describe()`, `callTool(name, args)`를 가지며, `export_note`는 `resolveTarget`과 `commit.prepare` / `commit.execute`를 거칩니다.
+- 도구 정의의 `_meta`에 `dev.agentinterop/` 접두사로 `effect`(`read`/`commit`), `group`, `keywords`, `resourceTypes`, `maxResultChars` 힌트를 둡니다. 호스트는 요청에 "hwpx", "hwp", "한글", "내보내" 같은 키워드가 있을 때만 모델에게 이 도구를 보여 줍니다.
+- 로드·언로드 때 워크스페이스 이벤트 `agentinterop:providers-changed`를 발생시킵니다.
+
+에이전트 호스트가 없어도 플러그인은 똑같이 동작합니다.
+
+## 알림
+
+- 데스크톱 전용입니다(파일 시스템으로 템플릿을 읽고 `.hwpx`를 씁니다).
+- 쓰는 파일: 내보낸 `.hwpx`, 처음 실행할 때 `HWPX templates` 폴더의 동봉 템플릿과 가이드, 에이전트 점검 중 OS 임시 폴더의 임시 파일(끝나면 지움).
+- 명령으로 내보낸 뒤 결과 파일을 시스템 기본 앱으로 엽니다.
+- 네트워크 접속, 사용 통계 수집, 계정이 없습니다.
+- 서드파티 렌더러 캡처는 다른 플러그인의 코드를 실행하므로 기본으로 꺼져 있습니다. 믿을 수 있는 노트에서만 켜세요.
+
+## 설치
+
+커뮤니티 플러그인 목록에 오른 뒤에는 *설정 → 커뮤니티 플러그인*에서 **HWP Exporter**를 설치합니다. 직접 설치하려면 최신 릴리스의 `main.js`, `manifest.json`, `styles.css`를 `<Vault>/.obsidian/plugins/hwpx-exporter/`에 복사합니다. 결과물을 열려면 한글(한컴오피스) 같은 HWPX 뷰어가 필요합니다.
+
+## 라이선스
+
+MIT. [LICENSE](LICENSE), [NOTICE](NOTICE) 참고. 변환기는 [pypandoc-hwpx](https://github.com/msjang/pypandoc-hwpx)(MIT)에서 파생했고, 저작권자는 LICENSE에 있습니다.

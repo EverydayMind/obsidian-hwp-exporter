@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Generated release asset (published through GitHub Releases only)
+/main.js
+*.map
+
+# Local Obsidian data
+data.json
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+
+# Internal design and agent documents
+AGENTS.md
+CLAUDE.md
+.claude/
+.codex/
+.cursor/
+docs/
+*PLAN*.md
+*REVIEW*.md

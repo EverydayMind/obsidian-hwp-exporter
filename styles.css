@@ -1,0 +1,11 @@
+.hwpx-exporter-setting-note {
+  color: var(--text-muted);
+}
+.hwpx-export-offscreen {
+    position: absolute;
+    left: -10000px;
+    top: 0;
+    visibility: hidden;
+    contain: layout style;
+    pointer-events: none;
+}

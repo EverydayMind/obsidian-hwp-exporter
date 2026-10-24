@@ -1,0 +1,47 @@
+// Templates and the template-writing guide embedded in main.js. A community-plugin install
+// downloads only main.js, manifest.json and styles.css, so the plugin carries these inside
+// main.js and writes them into the Vault ("Install bundled templates", and once on first run).
+// Shared by scripts/build-plugin.mjs and the release repository's esbuild.config.mjs.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
+// Marker-free or generator-input templates that a user would not export with.
+const NOT_BUNDLED = new Set(['blank.hwpx', 'placeholder-template.hwpx', 'placeholder-template-source.hwpx']);
+
+export function selectBundledTemplates(templatesDir) {
+    return fs.readdirSync(templatesDir)
+        .filter((name) => name.endsWith('.hwpx') && !NOT_BUNDLED.has(name))
+        .sort((a, b) => a.localeCompare(b))
+        .map((name) => path.join(templatesDir, name));
+}
+
+/** The one Markdown file in the guide folder. */
+export function selectGuide(guideDir) {
+    const guides = fs.readdirSync(guideDir).filter((name) => name.endsWith('.md'));
+    if (guides.length !== 1) throw new Error(`Expected exactly one guide in ${guideDir}, found ${guides.length}`);
+    return path.join(guideDir, guides[0]);
+}
+
+export function bundledTemplatesPlugin(files, guideFile) {
+    return {
+        name: 'bundled-templates',
+        setup(build) {
+            build.onResolve({ filter: /^virtual:bundled-templates$/ }, (args) => ({
+                path: args.path,
+                namespace: 'bundled-templates',
+            }));
+            build.onLoad({ filter: /.*/, namespace: 'bundled-templates' }, () => {
+                const templates = files.map((file) => ({
+                    name: path.basename(file),
+                    base64: fs.readFileSync(file).toString('base64'),
+                }));
+                const guide = { name: path.basename(guideFile), text: fs.readFileSync(guideFile, 'utf8') };
+                return {
+                    contents: `export default ${JSON.stringify(templates)};\nexport const guide = ${JSON.stringify(guide)};`,
+                    loader: 'js',
+                    watchFiles: [...files, guideFile],
+                };
+            });
+        },
+    };
+}

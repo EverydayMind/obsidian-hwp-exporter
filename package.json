@@ -1,0 +1,46 @@
+{
+  "name": "hwpx-exporter",
+  "version": "0.9.0",
+  "description": "Export Markdown notes to Hangul HWPX documents formatted by HWPX templates, with an MCP-like API for AI agent plugins.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint obsidian src",
+    "release:check": "node scripts/check-release.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "hwp",
+    "hwpx",
+    "hangul",
+    "markdown"
+  ],
+  "author": "everymind",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fast-xml-parser": "4.5.4",
+    "gray-matter": "4.0.3",
+    "jszip": "3.10.1",
+    "marked": "12.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.35",
+    "esbuild": "0.25.12",
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.4.2",
+    "obsidian": "1.12.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
+  },
+  "overrides": {
+    "eslint-plugin-obsidianmd": {
+      "obsidian": "$obsidian"
+    }
+  }
+}
