@@ -4,6 +4,7 @@ import { builtinModules } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bundledTemplatesPlugin, selectBundledTemplates, selectGuide } from './scripts/bundled-templates.mjs';
+import { dependencyShimsPlugin } from './scripts/dependency-shims.mjs';
 
 const projectDir = dirname(fileURLToPath(import.meta.url));
 const prod = process.argv.includes('production');
@@ -21,7 +22,7 @@ const options = {
 		'@lezer/common', '@lezer/highlight', '@lezer/lr',
 		...builtinModules, ...builtinModules.map((name) => `node:${name}`),
 	],
-	plugins: [bundledTemplatesPlugin(selectBundledTemplates(join(projectDir, 'templates')), selectGuide(join(projectDir, 'guide')))],
+	plugins: [dependencyShimsPlugin(), bundledTemplatesPlugin(selectBundledTemplates(join(projectDir, 'templates')), selectGuide(join(projectDir, 'guide')))],
 	platform: 'node',
 	format: 'cjs',
 	target: 'es2020',

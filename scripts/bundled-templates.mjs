@@ -11,7 +11,9 @@ const NOT_BUNDLED = new Set(['blank.hwpx', 'placeholder-template.hwpx', 'placeho
 export function selectBundledTemplates(templatesDir) {
     return fs.readdirSync(templatesDir)
         .filter((name) => name.endsWith('.hwpx') && !NOT_BUNDLED.has(name))
-        .sort((a, b) => a.localeCompare(b))
+        // Code-point order: localeCompare differs between Windows and Linux ICU, which made
+        // local and CI main.js differ.
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
         .map((name) => path.join(templatesDir, name));
 }
 
