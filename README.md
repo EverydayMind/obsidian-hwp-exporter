@@ -62,8 +62,8 @@ The plugin works the same without an agent host.
 
 ## Disclosures
 
-- **Desktop only.** The plugin uses the file system to read templates and write `.hwpx` files.
-- **Files it writes**: exported `.hwpx` files; on first run, the bundled templates and the guide in `HWPX templates`; temporary files in the OS temp folder during agent checks, removed afterwards.
+- **Desktop only, Node.js file system access.** The converter reads and writes files by path with Node's `fs` module, which is why the plugin is desktop only. It reads the note, the selected template and the images the note embeds, all inside the vault (an image link that does not resolve to a vault file is read only from inside the note's folder). It writes only the exported `.hwpx` file at the vault path shown in the settings, and a temporary folder in the OS temp directory while an agent checks or prepares an export; that folder is removed right after.
+- **Files it writes through the vault API**: on first run, the bundled templates and the guide in `HWPX templates`; an agent's approved `export_note` result.
 - **Opening files**: after an export from a command, the file is opened with the system's default app for `.hwpx` (usually Hangul).
 - **No network access, no telemetry, no account.**
 - **Third-party renderers** run other plugins' code-block processors during export. They are off by default. Turn them on only for notes you trust.

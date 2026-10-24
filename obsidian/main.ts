@@ -11,6 +11,7 @@ import {
     Plugin,
     PluginSettingTab,
     Setting,
+    type SettingDefinitionItem,
     TAbstractFile,
     TFile,
     TFolder,
@@ -892,209 +893,231 @@ export default class HWPXExporterPlugin extends Plugin {
     }
 }
 
+/** One settings row: rendered by Obsidian 1.13+ from getSettingDefinitions(), by display() before. */
+interface SettingRow {
+    name: string;
+    desc?: string;
+    visible?: () => boolean;
+    render: (setting: Setting) => void;
+}
+
+interface SettingSection {
+    heading?: string;
+    rows: SettingRow[];
+}
+
+/** One settings row: rendered by Obsidian 1.13+ from getSettingDefinitions(), by display() before. */
+interface SettingRow {
+    name: string;
+    desc?: string;
+    visible?: () => boolean;
+    render: (setting: Setting) => void;
+}
+
+interface SettingSection {
+    heading?: string;
+    rows: SettingRow[];
+}
+
 class HWPXExporterSettingTab extends PluginSettingTab {
     constructor(app: App, private readonly plugin: HWPXExporterPlugin) {
         super(app, plugin);
     }
 
+    /** Obsidian 1.13+: rendered declaratively and indexed for settings search. */
+    getSettingDefinitions(): SettingDefinitionItem[] {
+        return this.sections().map((section) => ({
+            type: 'group' as const,
+            heading: section.heading,
+            items: section.rows.map((row) => ({ name: row.name, desc: row.desc, visible: row.visible, render: row.render })),
+        }));
+    }
+
+    /** Obsidian before 1.13 (minAppVersion is lower), which never calls getSettingDefinitions(). */
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
+        for (const section of this.sections()) {
+            if (section.heading) new Setting(containerEl).setName(section.heading).setHeading();
+            for (const row of section.rows) {
+                if (row.visible && !row.visible()) continue;
+                const setting = new Setting(containerEl).setName(row.name);
+                if (row.desc) setting.setDesc(row.desc);
+                row.render(setting);
+            }
+        }
+    }
 
-        const templateFolders = this.plugin.getVaultFolders();
-        new Setting(containerEl)
-            .setName('Template folder')
-            .setDesc('Choose the vault folder containing the HWPX templates offered during export.')
-            .addDropdown((dropdown) => {
-                for (const folder of templateFolders) {
-                    dropdown.addOption(folder.path, folder.path || '/ (Vault root)');
-                }
-                dropdown.setValue(this.plugin.settings.templateFolderPath);
-                dropdown.onChange(async (value) => {
-                    this.plugin.settings.templateFolderPath = value;
-                    await this.plugin.saveSettings();
-                    this.display();
-                });
-            });
+    /** Re-renders after a change that alters other rows (descriptions, visibility). */
+    private refresh(): void {
+        // update() exists from Obsidian 1.13 (it re-reads the definitions and re-renders);
+        // older versions render through display().
+        const tab = this as { update?: () => void };
+        if (typeof tab.update === 'function') tab.update();
+        else this.display();
+    }
 
-        containerEl.createEl('p', {
-            text: `${this.plugin.getTemplateFilesInSelectedFolder().length} HWPX template(s) available in this folder.`,
+    private sections(): SettingSection[] {
+        const settings = this.plugin.settings;
+        const save = (): Promise<void> => this.plugin.saveSettings();
+        const toggle = (name: string, desc: string, key: BooleanSettingKey, after?: (value: boolean) => void): SettingRow => ({
+            name,
+            desc,
+            render: (setting) => { setting.addToggle((component) => component.setValue(settings[key]).onChange(async (value) => {
+                settings[key] = value;
+                await save();
+                after?.(value);
+            })); },
+        });
+        const positiveInt = (name: string, key: PositiveIntSettingKey): SettingRow => ({
+            name,
+            render: (setting) => { setting.addText((text) => text.setValue(String(settings[key])).onChange(async (value) => {
+                settings[key] = parsePositiveInt(value, DEFAULT_SETTINGS[key]);
+                await save();
+            })); },
         });
 
-        new Setting(containerEl)
-            .setName('Bundled templates')
-            .setDesc(`Copy the ${bundledTemplates.length} bundled templates and the template guide (${guide.name}) into the template folder (${DEFAULT_TEMPLATE_FOLDER} when the vault root is selected). Existing files are kept.`)
-            .addButton((button) => button
-                .setButtonText('Install')
-                .onClick(async () => {
-                    await this.plugin.installBundledTemplates();
-                    this.display();
-                }));
-
-        new Setting(containerEl)
-            .setName('템플릿 검사')
-            .setDesc('템플릿이 정의한 marker, 오타로 보이는 marker, marker가 없어 기본 모양으로 그릴 요소를 보여 준다.')
-            .addButton((button) => button
-                .setButtonText('검사')
-                .onClick(() => {
-                    void this.plugin.inspectTemplateFromPrompt();
-                }));
-
-        new Setting(containerEl)
-            .setName('Output mode')
-            .setDesc('Choose where exported .hwpx files will be written.')
-            .addDropdown((dropdown) => {
-                dropdown.addOption('same_as_source', 'Same folder as source note');
-                dropdown.addOption('fixed_folder', 'Fixed output folder');
-                dropdown.setValue(this.plugin.settings.outputMode);
-                dropdown.onChange(async (value) => {
-                    this.plugin.settings.outputMode = value as OutputMode;
-                    await this.plugin.saveSettings();
-                    this.display();
-                });
-            });
-
-        if (this.plugin.settings.outputMode === 'fixed_folder') {
-            new Setting(containerEl)
-                .setName('Fixed output folder')
-                .setDesc('Vault-relative folder path for generated .hwpx files.')
-                .addText((text) => {
-                    text.setPlaceholder('exports/hwpx')
-                        .setValue(this.plugin.settings.fixedOutputFolder)
-                        .onChange(async (value) => {
-                            this.plugin.settings.fixedOutputFolder = normalizePath(value.trim().replace(/^[/\\]+/, ''));
-                            await this.plugin.saveSettings();
-                        });
-                });
-        }
-
-        new Setting(containerEl)
-            .setName('Naming pattern')
-            .setDesc('Output filename pattern.')
-            .addDropdown((dropdown) => {
-                dropdown.addOption('{basename}.hwpx', '{basename}.hwpx');
-                dropdown.addOption('{basename}-{yyyyMMdd}.hwpx', '{basename}-{yyyyMMdd}.hwpx');
-                dropdown.setValue(this.plugin.settings.namingPattern);
-                dropdown.onChange(async (value) => {
-                    this.plugin.settings.namingPattern = value as NamingPattern;
-                    await this.plugin.saveSettings();
-                });
-            });
-
-        addToggleSetting(containerEl, 'Append sequence on filename conflict',
-            'If the output file exists, append -1, -2, ... instead of overwriting it.',
-            this.plugin.settings.appendSequenceOnConflict,
-            async (value) => {
-                this.plugin.settings.appendSequenceOnConflict = value;
-                await this.plugin.saveSettings();
-            });
-
-        new Setting(containerEl).setName('Conversion').setHeading();
-
-        new Setting(containerEl)
-            .setName('Page break before H1')
-            .setDesc('Insert page break before H1 when H1 is not the first block.')
-            .addToggle((toggle) => {
-                toggle.setValue(this.plugin.settings.pageBreakBeforeH1)
-                    .onChange(async (value) => {
-                        this.plugin.settings.pageBreakBeforeH1 = value;
-                        await this.plugin.saveSettings();
-                    });
-            });
-
-        new Setting(containerEl).setName('Rendered block capture').setHeading();
-
-        addToggleSetting(containerEl, 'Capture rendered blocks',
-            'Master switch. Turning this off never calls MarkdownRenderer.',
-            this.plugin.settings.captureRenderedBlocks,
-            async (value) => { this.plugin.settings.captureRenderedBlocks = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Capture Mermaid', 'Capture Mermaid code blocks as PNG.',
-            this.plugin.settings.captureMermaid,
-            async (value) => { this.plugin.settings.captureMermaid = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Capture static SVG files', 'Read SVG bytes directly from the vault and rasterize them.',
-            this.plugin.settings.captureSvgFiles,
-            async (value) => { this.plugin.settings.captureSvgFiles = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Capture third-party renderers',
-            'Runs registered code-block processors, including Plotly. Enable only for trusted notes.',
-            this.plugin.settings.captureThirdPartyRenderers,
-            async (value) => {
-                this.plugin.settings.captureThirdPartyRenderers = value;
-                await this.plugin.saveSettings();
-                if (value) new Notice('Third-party renderers execute code during export. Use only with trusted notes.', 8000);
-            });
-        addToggleSetting(containerEl, 'Force light theme', 'Apply a light theme class to the offscreen container.',
-            this.plugin.settings.forceLightThemeOnCapture,
-            async (value) => { this.plugin.settings.forceLightThemeOnCapture = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Aggressive light theme fallback',
-            'Temporarily toggles body classes during capture and may visibly flash the workspace.',
-            this.plugin.settings.forceLightThemeAggressive,
-            async (value) => { this.plugin.settings.forceLightThemeAggressive = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Disable Mermaid HTML labels',
-            'Avoid foreignObject output where Mermaid supports this setting.',
-            this.plugin.settings.mermaidDisableHtmlLabels,
-            async (value) => { this.plugin.settings.mermaidDisableHtmlLabels = value; await this.plugin.saveSettings(); });
-        addToggleSetting(containerEl, 'Use native image size', 'Use captured/intrinsic image dimensions before clamping.',
-            this.plugin.settings.useNativeImageSize,
-            async (value) => { this.plugin.settings.useNativeImageSize = value; await this.plugin.saveSettings(); });
-
-        new Setting(containerEl)
-            .setName('Raster scale')
-            .setDesc('Requested raster scale from 1 to 4; pixel budgets may reduce it.')
-            .addText((text) => text.setValue(String(this.plugin.settings.rasterScale)).onChange(async (value) => {
-                this.plugin.settings.rasterScale = Math.min(4, Math.max(1, Number.parseFloat(value) || DEFAULT_SETTINGS.rasterScale));
-                await this.plugin.saveSettings();
-            }));
-        new Setting(containerEl)
-            .setName('Capture width (CSS px)')
-            .setDesc('Use 0 for the 150 mm output-width estimate.')
-            .addText((text) => text.setValue(String(this.plugin.settings.captureWidthPx)).onChange(async (value) => {
-                this.plugin.settings.captureWidthPx = Math.max(0, Number.parseInt(value, 10) || 0);
-                await this.plugin.saveSettings();
-            }));
-
-        new Setting(containerEl).setName('Security limits').setHeading();
-
-        new Setting(containerEl)
-            .setName('Max input file size (MB)')
-            .addText((text) => {
-                text.setValue(String(this.plugin.settings.maxInputFileSizeMb))
-                    .onChange(async (value) => {
-                        this.plugin.settings.maxInputFileSizeMb = parsePositiveInt(value, DEFAULT_SETTINGS.maxInputFileSizeMb);
-                        await this.plugin.saveSettings();
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName('Max template file size (MB)')
-            .addText((text) => {
-                text.setValue(String(this.plugin.settings.maxTemplateFileSizeMb))
-                    .onChange(async (value) => {
-                        this.plugin.settings.maxTemplateFileSizeMb = parsePositiveInt(value, DEFAULT_SETTINGS.maxTemplateFileSizeMb);
-                        await this.plugin.saveSettings();
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName('Max nesting depth')
-            .addText((text) => {
-                text.setValue(String(this.plugin.settings.maxNestingDepth))
-                    .onChange(async (value) => {
-                        this.plugin.settings.maxNestingDepth = parsePositiveInt(value, DEFAULT_SETTINGS.maxNestingDepth);
-                        await this.plugin.saveSettings();
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName('Max image count')
-            .addText((text) => {
-                text.setValue(String(this.plugin.settings.maxImageCount))
-                    .onChange(async (value) => {
-                        this.plugin.settings.maxImageCount = parsePositiveInt(value, DEFAULT_SETTINGS.maxImageCount);
-                        await this.plugin.saveSettings();
-                    });
-            });
+        return [
+            {
+                rows: [
+                    {
+                        name: 'Template folder',
+                        desc: `Choose the vault folder containing the HWPX templates offered during export. ${this.plugin.getTemplateFilesInSelectedFolder().length} HWPX template(s) available in this folder.`,
+                        render: (setting) => { setting.addDropdown((dropdown) => {
+                            for (const folder of this.plugin.getVaultFolders()) {
+                                dropdown.addOption(folder.path, folder.path || '/ (Vault root)');
+                            }
+                            dropdown.setValue(settings.templateFolderPath);
+                            dropdown.onChange(async (value) => {
+                                settings.templateFolderPath = value;
+                                await save();
+                                this.refresh();
+                            });
+                        }); },
+                    },
+                    {
+                        name: 'Bundled templates',
+                        desc: `Copy the ${bundledTemplates.length} bundled templates and the template guide (${guide.name}) into the template folder (${DEFAULT_TEMPLATE_FOLDER} when the vault root is selected). Existing files are kept.`,
+                        render: (setting) => { setting.addButton((button) => button
+                            .setButtonText('Install')
+                            .onClick(async () => {
+                                await this.plugin.installBundledTemplates();
+                                this.refresh();
+                            })); },
+                    },
+                    {
+                        name: '템플릿 검사',
+                        desc: '템플릿이 정의한 marker, 오타로 보이는 marker, marker가 없어 기본 모양으로 그릴 요소를 보여 준다.',
+                        render: (setting) => { setting.addButton((button) => button
+                            .setButtonText('검사')
+                            .onClick(() => {
+                                void this.plugin.inspectTemplateFromPrompt();
+                            })); },
+                    },
+                    {
+                        name: 'Output mode',
+                        desc: 'Choose where exported .hwpx files will be written.',
+                        render: (setting) => { setting.addDropdown((dropdown) => {
+                            dropdown.addOption('same_as_source', 'Same folder as source note');
+                            dropdown.addOption('fixed_folder', 'Fixed output folder');
+                            dropdown.setValue(settings.outputMode);
+                            dropdown.onChange(async (value) => {
+                                settings.outputMode = value as OutputMode;
+                                await save();
+                                this.refresh();
+                            });
+                        }); },
+                    },
+                    {
+                        name: 'Fixed output folder',
+                        desc: 'Vault-relative folder path for generated .hwpx files.',
+                        visible: () => settings.outputMode === 'fixed_folder',
+                        render: (setting) => { setting.addText((text) => {
+                            text.setPlaceholder('exports/hwpx')
+                                .setValue(settings.fixedOutputFolder)
+                                .onChange(async (value) => {
+                                    settings.fixedOutputFolder = normalizePath(value.trim().replace(/^[/\\]+/, ''));
+                                    await save();
+                                });
+                        }); },
+                    },
+                    {
+                        name: 'Naming pattern',
+                        desc: 'Output filename pattern.',
+                        render: (setting) => { setting.addDropdown((dropdown) => {
+                            dropdown.addOption('{basename}.hwpx', '{basename}.hwpx');
+                            dropdown.addOption('{basename}-{yyyyMMdd}.hwpx', '{basename}-{yyyyMMdd}.hwpx');
+                            dropdown.setValue(settings.namingPattern);
+                            dropdown.onChange(async (value) => {
+                                settings.namingPattern = value as NamingPattern;
+                                await save();
+                            });
+                        }); },
+                    },
+                    toggle('Append sequence on filename conflict',
+                        'If the output file exists, append -1, -2, ... instead of overwriting it.',
+                        'appendSequenceOnConflict'),
+                ],
+            },
+            {
+                heading: 'Conversion',
+                rows: [
+                    toggle('Page break before H1', 'Insert page break before H1 when H1 is not the first block.', 'pageBreakBeforeH1'),
+                ],
+            },
+            {
+                heading: 'Rendered block capture',
+                rows: [
+                    toggle('Capture rendered blocks', 'Master switch. Turning this off never calls MarkdownRenderer.', 'captureRenderedBlocks'),
+                    toggle('Capture Mermaid', 'Capture Mermaid code blocks as PNG.', 'captureMermaid'),
+                    toggle('Capture static SVG files', 'Read SVG bytes directly from the vault and rasterize them.', 'captureSvgFiles'),
+                    toggle('Capture third-party renderers',
+                        'Runs registered code-block processors, including Plotly. Enable only for trusted notes.',
+                        'captureThirdPartyRenderers',
+                        (value) => {
+                            if (value) new Notice('Third-party renderers execute code during export. Use only with trusted notes.', 8000);
+                        }),
+                    toggle('Force light theme', 'Apply a light theme class to the offscreen container.', 'forceLightThemeOnCapture'),
+                    toggle('Aggressive light theme fallback',
+                        'Temporarily toggles body classes during capture and may visibly flash the workspace.',
+                        'forceLightThemeAggressive'),
+                    toggle('Disable Mermaid HTML labels', 'Avoid foreignObject output where Mermaid supports this setting.', 'mermaidDisableHtmlLabels'),
+                    toggle('Use native image size', 'Use captured/intrinsic image dimensions before clamping.', 'useNativeImageSize'),
+                    {
+                        name: 'Raster scale',
+                        desc: 'Requested raster scale from 1 to 4; pixel budgets may reduce it.',
+                        render: (setting) => { setting.addText((text) => text.setValue(String(settings.rasterScale)).onChange(async (value) => {
+                            settings.rasterScale = Math.min(4, Math.max(1, Number.parseFloat(value) || DEFAULT_SETTINGS.rasterScale));
+                            await save();
+                        })); },
+                    },
+                    {
+                        name: 'Capture width (CSS px)',
+                        desc: 'Use 0 for the 150 mm output-width estimate.',
+                        render: (setting) => { setting.addText((text) => text.setValue(String(settings.captureWidthPx)).onChange(async (value) => {
+                            settings.captureWidthPx = Math.max(0, Number.parseInt(value, 10) || 0);
+                            await save();
+                        })); },
+                    },
+                ],
+            },
+            {
+                heading: 'Security limits',
+                rows: [
+                    positiveInt('Max input file size (MB)', 'maxInputFileSizeMb'),
+                    positiveInt('Max template file size (MB)', 'maxTemplateFileSizeMb'),
+                    positiveInt('Max nesting depth', 'maxNestingDepth'),
+                    positiveInt('Max image count', 'maxImageCount'),
+                ],
+            },
+        ];
     }
 }
+
+type BooleanSettingKey = {
+    [K in keyof HWPXExporterSettings]: HWPXExporterSettings[K] extends boolean ? K : never
+}[keyof HWPXExporterSettings];
+type PositiveIntSettingKey = 'maxInputFileSizeMb' | 'maxTemplateFileSizeMb' | 'maxNestingDepth' | 'maxImageCount';
 
 function parsePositiveInt(value: string, fallback: number): number {
     const parsed = Number.parseInt(value, 10);
@@ -1102,19 +1125,6 @@ function parsePositiveInt(value: string, fallback: number): number {
         return fallback;
     }
     return parsed;
-}
-
-function addToggleSetting(
-    container: HTMLElement,
-    name: string,
-    description: string,
-    value: boolean,
-    onChange: (value: boolean) => Promise<void>
-): void {
-    new Setting(container)
-        .setName(name)
-        .setDesc(description)
-        .addToggle((toggle) => toggle.setValue(value).onChange(onChange));
 }
 
 function sanitizeFilename(name: string): string {
