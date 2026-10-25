@@ -17,8 +17,10 @@ export interface LayerBox {
 
 export interface LayerCandidate extends LayerBox {
     kind: 'svg' | 'canvas';
-    /** False for display:none, visibility:hidden or opacity 0. */
+    /** False for display:none, opacity 0 or an empty canvas. */
     visible: boolean;
+    /** Computed CSS visibility. */
+    visibility: string;
 }
 
 export interface LayerStack {
@@ -34,12 +36,20 @@ const MIN_OVERLAP_RATIO = 0.5;
  * Picks the sibling layers painted over the base layer. Candidates must be in
  * DOM order; the base is always kept. Layers placed beside the base (another
  * diagram, a toolbar) overlap it too little and are left out.
+ *
+ * Visibility is compared with the base, not with "visible": the offscreen
+ * capture container is visibility:hidden and every layer inherits that.
  */
 export function selectLayerStack(candidates: LayerCandidate[], baseIndex: number): LayerStack {
     const base = candidates[baseIndex];
     const indices: number[] = [];
     for (const [index, candidate] of candidates.entries()) {
-        if (index === baseIndex || (candidate.visible && hasArea(candidate) && overlapRatio(candidate, base) >= MIN_OVERLAP_RATIO)) {
+        if (index === baseIndex || (
+            candidate.visible
+            && candidate.visibility === base.visibility
+            && hasArea(candidate)
+            && overlapRatio(candidate, base) >= MIN_OVERLAP_RATIO
+        )) {
             indices.push(index);
         }
     }

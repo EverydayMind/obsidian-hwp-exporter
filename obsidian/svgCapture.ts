@@ -401,13 +401,13 @@ function collectLayerStack(svg: SVGElement): { layers: StackedLayer[]; bounds: L
         const rect = element.getBoundingClientRect();
         const style = getComputedStyle(element);
         const visible = style.display !== 'none'
-            && style.visibility !== 'hidden'
             && Number.parseFloat(style.opacity || '1') > 0
             && (element.tagName.toLowerCase() !== 'canvas'
                 || ((element as HTMLCanvasElement).width > 0 && (element as HTMLCanvasElement).height > 0));
         return {
             kind: element.tagName.toLowerCase() === 'canvas' ? 'canvas' : 'svg',
             visible,
+            visibility: style.visibility,
             left: rect.left,
             top: rect.top,
             width: rect.width,
