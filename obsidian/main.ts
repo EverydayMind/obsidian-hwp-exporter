@@ -957,6 +957,10 @@ class HWPXExporterSettingTab extends PluginSettingTab {
 
     /** Obsidian before 1.13 (minAppVersion is lower), which never calls getSettingDefinitions(). */
     display(): void {
+        this.renderRows();
+    }
+
+    private renderRows(): void {
         const { containerEl } = this;
         containerEl.empty();
         for (const section of this.sections()) {
@@ -973,10 +977,10 @@ class HWPXExporterSettingTab extends PluginSettingTab {
     /** Re-renders after a change that alters other rows (descriptions, visibility). */
     private refresh(): void {
         // update() exists from Obsidian 1.13 (it re-reads the definitions and re-renders);
-        // older versions render through display().
+        // older versions render the rows directly.
         const tab = this as { update?: () => void };
         if (typeof tab.update === 'function') tab.update();
-        else this.display();
+        else this.renderRows();
     }
 
     private sections(): SettingSection[] {
