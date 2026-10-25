@@ -1,6 +1,6 @@
-# HWP Exporter
+# HWPX Exporter
 
-HWP Exporter exports Markdown notes to Hangul (Hancom Office) HWPX documents. The look of the output comes from an HWPX template that you edit in Hangul. The plugin also gives AI agent plugins an MCP-like API to check and run exports.
+HWPX Exporter exports Markdown notes to Hangul (Hancom Office) HWPX documents. The look of the output comes from an HWPX template that you edit in Hangul. The plugin also gives AI agent plugins an MCP-like API to check and run exports.
 
 [한국어 설명](README.ko.md)
 
@@ -44,7 +44,7 @@ Copy `견본 템플릿.hwpx` (sample template), open it in Hangul, change the fo
 
 ## API for AI agent plugins
 
-HWP Exporter exposes an agentinterop v1 capability provider on its plugin instance. A compatible agent host can read the tool definitions and call them after you approve them in the host:
+HWPX Exporter exposes an agentinterop v1 capability provider on its plugin instance. A compatible agent host can read the tool definitions and call them after you approve them in the host:
 
 - `get_export_options`: available templates, output location, naming and capture settings.
 - `check_export`: a trial conversion of one note in the OS temp folder. It reports the output path, the note's structure, images that cannot be embedded and code blocks that would be captured. Nothing is written to the vault.
@@ -70,7 +70,7 @@ The plugin works the same without an agent host.
 
 ## Installation
 
-Once listed, install **HWP Exporter** from *Settings → Community plugins*. To install manually, copy `main.js`, `manifest.json` and `styles.css` from the latest release into `<Vault>/.obsidian/plugins/hwpx-exporter/`.
+Once listed, install **HWPX Exporter** from *Settings → Community plugins*. To install manually, copy `main.js`, `manifest.json` and `styles.css` from the latest release into `<Vault>/.obsidian/plugins/hwpx-exporter/`.
 
 You need Hangul (Hancom Office) or another HWPX viewer to open the output. The plugin itself does not need it.
 

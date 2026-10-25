@@ -5,3 +5,9 @@ Upstream project:
 
 Original license:
   MIT License (see LICENSE)
+
+Report style schema validators are generated at development time by Ajv 6.15.0
+(MIT, copyright Evgeny Poberezkin), using the local report-style/v1 contracts.
+Runtime uses Ajv's static format/Unicode helpers and fast-deep-equal (MIT).
+The bounded report-style readers and template derivation modules are new local
+implementations; they do not import the neighboring KORDOC engine at runtime.

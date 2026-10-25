@@ -1,3 +1,4 @@
+import type { InputDependency } from './deriveProvider';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -355,7 +356,7 @@ export default class HWPXExporterPlugin extends Plugin {
             templates: () => this.getTemplateFilesInSelectedFolder().map((file) => file.path),
             readNote: async (notePath) => {
                 const file = noteFile(notePath);
-                return file ? { markdown: await this.app.vault.cachedRead(file) } : null;
+                return file ? { markdown: new TextDecoder('utf-8', { fatal: true }).decode(await this.app.vault.adapter.readBinary(file.path)) } : null;
             },
             outputPath: (notePath) => this.buildOutputVaultPath(requireNote(notePath)),
             exists: (vaultPath) => fs.existsSync(path.join(this.getFileSystemAdapter().getBasePath(), normalizePath(vaultPath))),
@@ -383,7 +384,7 @@ export default class HWPXExporterPlugin extends Plugin {
                 if (!fs.existsSync(absolute)) throw new Error(`Template not found: ${templatePath}`);
                 return createHash('sha256').update(fs.readFileSync(absolute)).digest('hex');
             },
-            render: (notePath, templatePath) => this.renderNoteBytes(requireNote(notePath), templatePath),
+            render: (notePath, templatePath, signal) => this.renderNoteBytes(requireNote(notePath), templatePath, signal),
             missingFolders: (vaultPath) => {
                 const parts = normalizePath(vaultPath).split('/').slice(0, -1);
                 return parts
@@ -567,14 +568,16 @@ export default class HWPXExporterPlugin extends Plugin {
     }
 
     /** Render capture + conversion of one note into an absolute output path. */
-    private async convertNote(file: TFile, templatePath: string, outputAbsolutePath: string): Promise<ConversionReport> {
+    private async convertNote(file: TFile, templatePath: string, outputAbsolutePath: string, frozen?: { signal?: AbortSignal; markdown: string; templateAbsolutePath: string; record(path: string, bytes: Uint8Array): void }): Promise<ConversionReport> {
         const adapter = this.getFileSystemAdapter();
-        const templateAbsolutePath = this.resolveTemplateAbsolutePath(templatePath);
+        const templateAbsolutePath = frozen?.templateAbsolutePath ?? this.resolveTemplateAbsolutePath(templatePath);
         if (!fs.existsSync(templateAbsolutePath)) {
             throw new Error(`Template not found: ${templateAbsolutePath}`);
         }
 
-        const sourceMarkdown = await this.app.vault.cachedRead(file);
+        frozen?.signal?.throwIfAborted();
+        const sourceMarkdown = frozen?.markdown ?? await this.app.vault.cachedRead(file);
+        if (frozen && this.settings.captureThirdPartyRenderers && this.settings.thirdPartyLanguages.some(language => sourceMarkdown.includes(`\x60\x60\x60${language}`))) throw new Error('Third-party rendered-block inputs cannot yet be completely bound for agent export.');
         const captureWidthPx = this.settings.captureWidthPx > 0
             ? this.settings.captureWidthPx
             : Math.floor(new ConversionConfig().IMAGE_MAX_WIDTH_MM * 96 / 25.4);
@@ -596,12 +599,13 @@ export default class HWPXExporterPlugin extends Plugin {
             forceLightThemeAggressive: this.settings.forceLightThemeAggressive,
             allowForeignObject: this.settings.allowForeignObject,
             mermaidDisableHtmlLabels: this.settings.mermaidDisableHtmlLabels,
-            resolveSvgAsset: (linkPath, basePath) => this.resolveVaultBinaryAsset(
-                linkPath,
-                basePath ?? file.path,
-                file
-            ),
+            resolveSvgAsset: async (linkPath, basePath) => {
+                const asset = await this.resolveVaultBinaryAsset(linkPath, basePath ?? file.path, file);
+                if (asset) frozen?.record(asset.vaultPath, new Uint8Array(asset.bytes));
+                return asset;
+            },
         });
+        frozen?.signal?.throwIfAborted();
         if (capture.contractViolation) {
             new Notice('SVG capture mapping failed; original Markdown was restored.', 8000);
         }
@@ -619,12 +623,16 @@ export default class HWPXExporterPlugin extends Plugin {
             imagePathResolver: (source) => this.resolveVaultImageAbsolutePath(source, file),
             imageAssetResolver: (source) => {
                 const asset = capture.assets.get(source);
-                return asset ? {
-                    bytes: asset.bytes,
-                    ext: asset.ext,
-                    displayWidthPx: asset.displayWidthPx,
-                    displayHeightPx: asset.displayHeightPx,
-                } : null;
+                if (asset) return { bytes: asset.bytes, ext: asset.ext, displayWidthPx: asset.displayWidthPx, displayHeightPx: asset.displayHeightPx };
+                if (!frozen) return null;
+                const absolute = this.resolveVaultImageAbsolutePath(source, file);
+                if (!absolute) return null;
+                const bytes = fs.readFileSync(absolute);
+                const vaultPath = normalizePath(path.relative(adapter.getBasePath(), absolute));
+                frozen.record(vaultPath, bytes);
+                const ext = path.extname(absolute).slice(1).toLowerCase();
+                if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'gif') return { bytes, ext: ext === 'jpeg' ? 'jpg' : ext };
+                throw new Error('Agent export currently requires PNG/JPEG/GIF or captured image bytes.');
             },
         });
         if (report.warnings.length > 0) {
@@ -636,13 +644,27 @@ export default class HWPXExporterPlugin extends Plugin {
     /** Converts into memory (OS temp folder), for the agent commit: no Vault file is written. */
     private async renderNoteBytes(
         file: TFile,
-        templatePath: string
-    ): Promise<{ bytes: Uint8Array; report: ConversionReport }> {
+        templatePath: string,
+        signal?: AbortSignal
+    ): Promise<{ bytes: Uint8Array; report: ConversionReport; inputDependencies: InputDependency[]; providerInternalWrites: string[] }> {
+        signal?.throwIfAborted();
+        const dependencies = new Map<string, string>(); let total = 0;
+        const record = (vaultPath: string, bytes: Uint8Array) => {
+            if (vaultPath.split('/').some(part => !part || part.startsWith('.')) || bytes.length > 32 * 1024 * 1024 || (total += bytes.length) > 128 * 1024 * 1024) throw new Error('Export input path/byte budget exceeded.');
+            const hash = createHash('sha256').update(bytes).digest('hex'), previous = dependencies.get(vaultPath);
+            if (previous && previous !== hash) throw new Error('Export input changed while being read.');
+            dependencies.set(vaultPath, hash); if (dependencies.size > 32) throw new Error('Export dependency count exceeded.');
+        };
+        const noteBytes = new Uint8Array(await this.app.vault.adapter.readBinary(file.path)), templateBytes = new Uint8Array(await this.app.vault.adapter.readBinary(templatePath));
+        record(file.path, noteBytes); record(templatePath, templateBytes);
+        signal?.throwIfAborted();
         const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hwpx-export-commit-'));
         try {
             const output = path.join(workDir, 'export.hwpx');
-            const report = await this.convertNote(file, templatePath, output);
-            return { bytes: new Uint8Array(fs.readFileSync(output)), report };
+            const frozenTemplate = path.join(workDir, 'template.hwpx'); fs.writeFileSync(frozenTemplate, templateBytes);
+            const report = await this.convertNote(file, templatePath, output, { signal, markdown: new TextDecoder('utf-8', { fatal: true }).decode(noteBytes), templateAbsolutePath: frozenTemplate, record });
+            signal?.throwIfAborted();
+            return { bytes: new Uint8Array(fs.readFileSync(output)), report, inputDependencies: [...dependencies].map(([path, sha256]) => ({ path, sha256 })), providerInternalWrites: [workDir, frozenTemplate, output] };
         } finally {
             fs.rmSync(workDir, { recursive: true, force: true });
         }

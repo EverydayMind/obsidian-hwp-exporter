@@ -1,3 +1,4 @@
+import { DERIVE_TOOL_DEFINITIONS, markerCatalog, DeriveProviderError, resolveDerivation, prepareDerivation, derivationReport, dependenciesCurrent, type InputDependency } from './deriveProvider';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -126,7 +127,7 @@ export interface ExportProviderHost {
     /** sha256 (hex) of the template file: binds the approved template to the one converted. */
     templateHash(templatePath: string): Promise<string>;
     /** The full export (render capture + conversion) into memory. Writes no Vault file. */
-    render(notePath: string, templatePath: string): Promise<{ bytes: Uint8Array; report: ConversionReport }>;
+    render(notePath: string, templatePath: string, signal?: AbortSignal): Promise<{ bytes: Uint8Array; report: ConversionReport; inputDependencies?: InputDependency[]; providerInternalWrites?: string[] }>;
     /** Ancestor folders of a Vault path that do not exist yet, outermost first. */
     missingFolders(vaultPath: string): string[];
     /** Creates the folders, then the new file. Fails rather than overwriting. */
@@ -158,6 +159,7 @@ const meta = (): JsonObject => ({
 });
 
 const TOOLS: JsonObject[] = [
+    ...DERIVE_TOOL_DEFINITIONS,
     {
         name: 'get_export_options',
         title: 'HWPX 내보내기 설정',
@@ -193,6 +195,8 @@ const TOOLS: JsonObject[] = [
             properties: {
                 path: { type: 'string', minLength: 1, maxLength: 4096, description: '내보낼 Markdown 노트의 Vault 기준 상대 경로 (예: "노트.md", "100.내용/보고서.md").' },
                 template: { type: 'string', minLength: 1, maxLength: 4096, description: 'get_export_options로 확인한 템플릿 경로 중 하나. 생략하면 목록의 첫 번째 템플릿을 사용한다.' },
+                expected_note_sha256: { type: 'string', minLength: 64, maxLength: 64 },
+                expected_template_sha256: { type: 'string', minLength: 64, maxLength: 64 },
                 outputPath: { type: 'string', minLength: 1, maxLength: 4096, description: '결과 .hwpx 파일의 Vault 기준 상대 경로. 생략하면 플러그인 설정의 위치/이름 규칙을 따른다.' },
             },
         },
@@ -381,6 +385,7 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
     const resolveTarget = async (name: string, args: JsonObject, ctx?: CommitContext): Promise<ExportTarget> => {
         if (disposed) throw new ToolError('DISPOSED', '플러그인이 종료됐다.');
         if (ctx?.signal?.aborted) throw new ToolError('CANCELLED', '대상 확인이 취소됐다.');
+        if (name === 'derive_template') return resolveDerivation(host, args);
         if (name !== 'export_note') throw new ToolError('UNKNOWN_TOOL', `저장 도구가 아니다: ${name}`);
         const { template, destination } = await resolveExport(args ?? {});
         return { kind: 'new', destination, template: { path: template, sha256: await host.templateHash(template) } };
@@ -400,14 +405,28 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
         /** Fixes the exact bytes of the new file in memory. Writes no Vault file. */
         async prepare(request, ctx) {
             if (disposed) throw new ToolError('DISPOSED', '플러그인이 종료됐다.');
-            if (request?.tool !== 'export_note') throw new ToolError('UNKNOWN_TOOL', `저장 도구가 아니다: ${String(request?.tool)}`);
+            if (!['export_note', 'derive_template'].includes(request?.tool)) throw new ToolError('UNKNOWN_TOOL', `저장 도구가 아니다: ${String(request?.tool)}`);
             if (!ctx?.caller) throw new ToolError('INVALID_ARGUMENT', '저장을 요청한 호출을 확인할 수 없다.');
             const target = await resolveTarget(request.tool, request.args, ctx);
             if (canonicalJson(target) !== canonicalJson(request.target)) {
                 throw new ToolError('TARGET_MISMATCH', '확정한 노트·템플릿·저장 경로가 지금과 다르다. 다시 준비하라.', true);
             }
-            const { notePath, template } = await resolveExport(request.args ?? {});
-            const { bytes, report } = await host.render(notePath, template);
+            let bytes: Uint8Array, notePath: string, template: string;
+            let report: ConversionReport | undefined, derivation: Record<string, unknown> | undefined;
+            let inputDependencies: InputDependency[], providerInternalWrites: string[] = [];
+            if (request.tool === 'derive_template') {
+                const prepared = await prepareDerivation(host, request.args, ctx.signal);
+                bytes = prepared.bytes; derivation = prepared.report; notePath = prepared.notePath; template = target.template.path; inputDependencies = prepared.inputDependencies;
+            } else {
+                const resolved = await resolveExport(request.args ?? {}); notePath = resolved.notePath; template = resolved.template;
+                const noteBytes = await host.readBytes(notePath), templateBytes = await host.readBytes(template);
+                if (!noteBytes || !templateBytes) throw new ToolError('SOURCE_CHANGED', 'Export inputs are missing.');
+                inputDependencies = [{ path: notePath, sha256: sha256(noteBytes) }, { path: template, sha256: sha256(templateBytes) }];
+                if (inputDependencies[1].sha256 !== target.template.sha256 || request.args.expected_note_sha256 !== undefined && request.args.expected_note_sha256 !== inputDependencies[0].sha256 || request.args.expected_template_sha256 !== undefined && request.args.expected_template_sha256 !== inputDependencies[1].sha256) throw new ToolError('SOURCE_CHANGED', 'Export input hash changed.');
+                const rendered = await host.render(notePath, template, ctx.signal); bytes = rendered.bytes; report = rendered.report;
+                inputDependencies.push(...(rendered.inputDependencies ?? [])); providerInternalWrites = rendered.providerInternalWrites ?? [];
+            }
+            if (!await dependenciesCurrent(host, inputDependencies)) throw new ToolError('SOURCE_CHANGED', 'Input changed during preparation.');
             if (ctx.signal?.aborted) throw new ToolError('CANCELLED', '저장 준비가 취소됐다.');
             const owner = ownerOf(ctx.caller);
             for (const record of prepared.values()) {
@@ -423,7 +442,7 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 template: target.template,
                 destination: target.destination,
                 format: 'hwpx',
-                saveOptions: { note: notePath },
+                saveOptions: { note: notePath, inputDependencies: inputDependencies.map(item => ({ path: item.path, sha256: item.sha256 })) },
                 writeSet: [
                     ...folders,
                     {
@@ -431,10 +450,11 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                         sha256Before: null, sha256Expected: sha256(bytes), sizeBytes: bytes.byteLength,
                     },
                 ],
-                providerInternalWrites: [],
+                providerInternalWrites,
                 report: {
                     summary: [`노트 ${notePath}을(를) 템플릿 ${template}로 변환한 새 파일을 만든다.`],
-                    warnings: warningLines(report).slice(0, 20).map((line) => line.slice(0, 300)),
+                    warnings: report ? warningLines(report).slice(0, 20).map((line) => line.slice(0, 300)) : [],
+                    ...(derivation ? { derivation: derivation as JsonObject } : {}),
                 },
                 expiresAt: new Date(Date.now() + COMMIT_TTL_MS).toISOString(),
             };
@@ -475,6 +495,9 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 return notWritten(record, ticketId, 'ALREADY_EXISTS', `이미 있는 파일은 덮어쓰지 않는다: ${destination}`);
             }
 
+            const dependencies = record.shown.saveOptions.inputDependencies as Array<{ path: string; sha256: string }>;
+            if (!await dependenciesCurrent(host, dependencies).catch(() => false)) { record.state = 'dropped'; return notWritten(record, ticketId, 'SOURCE_CHANGED', 'Input changed after preparation; nothing was written.'); }
+            if (disposed || ctx.signal?.aborted) return notWritten(record, ticketId, 'CANCELLED', 'Save cancelled before first write.');
             record.state = 'executed';
             const folders = record.shown.writeSet.filter((entry): entry is FolderEntry => entry.kind === 'folder').map((entry) => entry.path);
             let error: CommitReceipt['error'];
@@ -484,16 +507,23 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 error = { code: 'WRITE_FAILED', message: (cause instanceof Error ? cause.message : String(cause)).slice(0, 1000) };
             }
             // Report only what can be read back.
-            const stillMissing = new Set(host.missingFolders(destination));
-            const after = await host.readBytes(destination).catch(() => null);
+            let foldersUnverified = false, fileUnverified = false;
+            let stillMissing = new Set<string>();
+            try { stillMissing = new Set(host.missingFolders(destination)); }
+            catch (cause) { foldersUnverified = true; error ??= { code: 'READBACK_FAILED', message: (cause instanceof Error ? cause.message : String(cause)).slice(0, 1000) }; }
+            const after = await host.readBytes(destination).catch((cause: unknown) => {
+                fileUnverified = true;
+                error ??= { code: 'READBACK_FAILED', message: (cause instanceof Error ? cause.message : String(cause)).slice(0, 1000) };
+                return null;
+            });
             const fileHash = after ? sha256(after) : undefined;
             const expected = (record.shown.writeSet.find((entry) => entry.kind === 'file') as FileEntry).sha256Expected;
             const entries: CommitReceipt['entries'] = record.shown.writeSet.map((entry) => entry.kind === 'folder'
-                ? { path: entry.path, kind: 'folder' as const, state: stillMissing.has(entry.path) ? 'not_written' as const : 'written' as const }
+                ? { path: entry.path, kind: 'folder' as const, state: foldersUnverified ? 'unknown' as const : stillMissing.has(entry.path) ? 'not_written' as const : 'written' as const }
                 : {
                     path: entry.path,
                     kind: 'file' as const,
-                    state: !fileHash ? 'not_written' as const : fileHash === expected ? 'written' as const : 'unknown' as const,
+                    state: fileUnverified ? 'unknown' as const : !fileHash ? 'not_written' as const : fileHash === expected ? 'written' as const : 'unknown' as const,
                     ...(fileHash ? { sha256After: fileHash } : {}),
                 });
             const states = entries.map((entry) => entry.state);
@@ -520,7 +550,12 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
         },
     };
 
-    const handlers: Record<string, (args: JsonObject) => Promise<AgentToolResult>> = {
+    const handlers: Record<string, (args: JsonObject, signal?: AbortSignal) => Promise<AgentToolResult>> = {
+        async get_derivation_report(args, signal) {
+            const report = await derivationReport(host, args, signal);
+            return { content: [{ type: 'text', text: 'Current derivation report; layout not measured.' }], structuredContent: report, _meta: { 'dev.agentinterop/evidencePaths': [typeof args.path === 'string' ? args.path : ''] } };
+        },
+        async derive_template() { throw new ToolError('INVALID_ARGUMENT', 'derive_template requires the host commit approval pipeline.'); },
         async get_export_options(): Promise<AgentToolResult> {
             const options = host.options();
             const templates = host.templates();
@@ -542,6 +577,7 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 content: [{ type: 'text', text: lines.join('\n') }],
                 structuredContent: {
                     templates: templates.length,
+                    templatePaths: templates, templateFolderPath: options.templateFolderPath, markerCatalog, prefixMarkerSupport: 1,
                     outputMode: options.outputMode,
                     overwritesExisting: !options.appendSequenceOnConflict,
                 },
@@ -631,6 +667,8 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 content: [{ type: 'text', text: lines.join('\n') }],
                 structuredContent: {
                     converts: !failure,
+                    noteSha256: await host.readBytes(notePath).then(bytes => bytes ? sha256(bytes) : null),
+                    templateSha256: await host.templateHash(template),
                     outputPath,
                     template,
                     tables: shape.tables,
@@ -661,13 +699,13 @@ export function createAgentProvider(host: ExportProviderHost): AgentCapabilityPr
                 if (disposed) throw new ToolError('DISPOSED', '플러그인이 종료됐다.');
                 const handler = Object.prototype.hasOwnProperty.call(handlers, name) ? handlers[name] : undefined;
                 if (!handler) throw new ToolError('UNKNOWN_TOOL', `알 수 없는 도구다: ${name}`);
-                const result = await handler(args ?? {});
+                const result = await handler(args ?? {}, ctx?.signal);
                 if (ctx?.signal?.aborted) throw new ToolError('CANCELLED', '호출이 취소됐다.');
                 return result;
             } catch (error) {
-                const known = error instanceof ToolError;
+                const known = error instanceof ToolError || error instanceof DeriveProviderError;
                 const code = known ? error.code : 'INTERNAL';
-                const retryable = known && error.retryable;
+                const retryable = error instanceof ToolError && error.retryable;
                 return {
                     isError: true,
                     content: [{ type: 'text', text: known ? error.message : `도구 실행 중 오류: ${error instanceof Error ? error.message : String(error)}` }],

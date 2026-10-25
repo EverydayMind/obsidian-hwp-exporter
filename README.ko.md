@@ -1,4 +1,4 @@
-# HWP Exporter
+# HWPX Exporter
 
 마크다운 노트를 한글(HWPX) 문서로 내보내는 옵시디언 플러그인입니다. 결과물의 모양은 한글에서 고칠 수 있는 HWPX 템플릿이 정합니다. AI 에이전트 플러그인이 내보내기를 점검하고 실행할 수 있는 MCP-like API도 제공합니다.
 
@@ -52,7 +52,7 @@ agentinterop v1 provider는 AI 에이전트 기능을 수행하는 다른 옵시
 
 ## 설치
 
-커뮤니티 플러그인 목록에 오른 뒤에는 *설정 → 커뮤니티 플러그인*에서 **HWP Exporter**를 설치합니다. 직접 설치하려면 최신 릴리스의 `main.js`, `manifest.json`, `styles.css`를 `<Vault>/.obsidian/plugins/hwpx-exporter/`에 복사합니다. 결과물을 열려면 한글(한컴오피스) 같은 HWPX 뷰어가 필요합니다.
+커뮤니티 플러그인 목록에 오른 뒤에는 *설정 → 커뮤니티 플러그인*에서 **HWPX Exporter**를 설치합니다. 직접 설치하려면 최신 릴리스의 `main.js`, `manifest.json`, `styles.css`를 `<Vault>/.obsidian/plugins/hwpx-exporter/`에 복사합니다. 결과물을 열려면 한글(한컴오피스) 같은 HWPX 뷰어가 필요합니다.
 
 ## 라이선스
 
