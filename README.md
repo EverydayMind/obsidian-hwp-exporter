@@ -70,7 +70,7 @@ The plugin works the same without an agent host.
 
 ## Installation
 
-Once listed, install **HWPX Exporter** from *Settings → Community plugins*. To install manually, copy `main.js`, `manifest.json` and `styles.css` from the latest release into `<Vault>/.obsidian/plugins/hwpx-exporter/`.
+Once listed, install **HWPX Exporter** from *Settings → Community plugins*. To install manually, copy `main.js`, `manifest.json` and `styles.css` from the latest release into `<Vault>/.obsidian/plugins/md-to-hwpx/`.
 
 You need Hangul (Hancom Office) or another HWPX viewer to open the output. The plugin itself does not need it.
 

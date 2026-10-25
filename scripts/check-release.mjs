@@ -8,7 +8,7 @@ export function validateRelease({ manifest, pkg, versions, tracked }, tag) {
     if (!semver.test(manifest.version) || !semver.test(manifest.minAppVersion)) throw new Error('Manifest versions must use x.y.z');
     if (manifest.version !== pkg.version || versions[manifest.version] !== manifest.minAppVersion) throw new Error('Package, manifest and versions metadata disagree');
     if (tag !== undefined && tag !== manifest.version) throw new Error('Release tag does not match manifest version');
-    if (manifest.id !== 'hwpx-exporter' || pkg.name !== 'hwpx-exporter') throw new Error('Unexpected plugin identity');
+    if (manifest.id !== 'md-to-hwpx' || pkg.name !== 'md-to-hwpx') throw new Error('Unexpected plugin identity');
     if (manifest.isDesktopOnly !== true || !manifest.description?.endsWith('.') || !manifest.author) throw new Error('Incomplete manifest metadata');
     const forbidden = tracked.filter(path => /(^|\/)(AGENTS|CLAUDE)\.md$|(^|\/)[^/]*(PLAN|REVIEW)[^/]*\.md$|^(\.claude|\.codex|\.cursor|docs|node_modules)\/|(^|\/)data\.json$|^main\.js$|\.map$/i.test(path)
         || (/\.hwpx$/i.test(path) && !path.startsWith('templates/')));
