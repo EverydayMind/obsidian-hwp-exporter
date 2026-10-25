@@ -5,6 +5,7 @@ import * as os from 'os';
 import { createHash } from 'crypto';
 import {
     App,
+    FileView,
     FuzzySuggestModal,
     Menu,
     Modal,
@@ -16,6 +17,7 @@ import {
     TAbstractFile,
     TFile,
     TFolder,
+    type WorkspaceLeaf,
     normalizePath,
     FileSystemAdapter,
 } from 'obsidian';
@@ -40,6 +42,8 @@ import bundledTemplates, { guide } from 'virtual:bundled-templates';
 
 // Where "Install bundled templates" writes when no template folder has been chosen.
 const DEFAULT_TEMPLATE_FOLDER = 'HWPX templates';
+// When this plugin is enabled, a single-note export opens in its editor instead of the OS default app.
+const HWP_HANDS_PLUGIN_ID = 'hwp-hands';
 
 type OutputMode = 'same_as_source' | 'fixed_folder';
 type NamingPattern = '{basename}.hwpx' | '{basename}-{yyyyMMdd}.hwpx';
@@ -670,7 +674,63 @@ export default class HWPXExporterPlugin extends Plugin {
         }
     }
 
-    private async openExportedFile(outputVaultPath: string): Promise<void> {
+    /** Opens the export in HWP Hands when that plugin is enabled, otherwise in the OS default app. Returns where it opened. */
+    private async openExportedFile(outputVaultPath: string): Promise<string> {
+        if (await this.openInHwpHands(outputVaultPath)) return 'HWP Hands';
+        await this.openWithDefaultApp(outputVaultPath);
+        return 'the default app';
+    }
+
+    /** False means "fall back to the default app": HWP Hands is not enabled, the Vault never indexed the file, or opening failed. */
+    private async openInHwpHands(outputVaultPath: string): Promise<boolean> {
+        // HWP Hands' own API package finds the plugin the same way (app.plugins); its API v1 has no UI call, so this uses the file-menu action.
+        const plugins = (this.app as unknown as { plugins?: { getPlugin?(id: string): unknown } }).plugins;
+        const hwpHands = plugins?.getPlugin?.(HWP_HANDS_PLUGIN_ID) as { openInEditor?(file: TFile): Promise<void> } | null | undefined;
+        if (typeof hwpHands?.openInEditor !== 'function') return false;
+
+        const file = await this.waitForVaultFile(normalizePath(outputVaultPath));
+        if (!file) return false;
+        try {
+            // Re-exporting the same note: show the tab that already has it; HWP Hands reloads it on the Vault modify event.
+            const openLeaves: WorkspaceLeaf[] = [];
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                if (leaf.view instanceof FileView && leaf.view.file?.path === file.path) openLeaves.push(leaf);
+            });
+            const openLeaf = openLeaves[0];
+            if (openLeaf) {
+                // revealLeaf() exists from Obsidian 1.7.2 (it also expands a collapsed sidebar);
+                // older versions only activate the tab.
+                const workspace = this.app.workspace as { revealLeaf?: (leaf: WorkspaceLeaf) => Promise<void> };
+                if (typeof workspace.revealLeaf === 'function') await workspace.revealLeaf(openLeaf);
+                else this.app.workspace.setActiveLeaf(openLeaf, { focus: true });
+            } else {
+                await hwpHands.openInEditor.call(hwpHands, file);
+            }
+            return true;
+        } catch (error) {
+            console.warn('[HWPX Exporter] Opening in HWP Hands failed; using the default app', error);
+            return false;
+        }
+    }
+
+    /** The converter writes with fs, so the Vault learns about a new file a moment later through its watcher. */
+    private waitForVaultFile(vaultPath: string, timeoutMs = 3000): Promise<TFile | null> {
+        const existing = this.app.vault.getAbstractFileByPath(vaultPath);
+        if (existing instanceof TFile) return Promise.resolve(existing);
+        return new Promise((resolve) => {
+            const finish = (file: TFile | null) => {
+                window.clearTimeout(timer);
+                this.app.vault.offref(ref);
+                resolve(file);
+            };
+            const ref = this.app.vault.on('create', (created) => {
+                if (created instanceof TFile && created.path === vaultPath) finish(created);
+            });
+            const timer = window.setTimeout(() => finish(null), timeoutMs);
+        });
+    }
+
+    private async openWithDefaultApp(outputVaultPath: string): Promise<void> {
         const adapter = this.getFileSystemAdapter();
         const outputAbsolutePath = path.join(adapter.getBasePath(), outputVaultPath);
         // eslint-disable-next-line @typescript-eslint/no-require-imports -- Obsidian desktop provides electron at runtime; it has no import or type package here
@@ -704,9 +764,9 @@ export default class HWPXExporterPlugin extends Plugin {
         }
 
         try {
-            await this.openExportedFile(outputPath);
+            const openedWith = await this.openExportedFile(outputPath);
             startNotice.hide();
-            new Notice(`HWPX exported and opened: ${outputPath}`);
+            new Notice(`HWPX exported and opened in ${openedWith}: ${outputPath}`);
             this.showConversionWarnings(report);
         } catch (error) {
             console.error('[HWPX Exporter] Opening exported file failed', error);

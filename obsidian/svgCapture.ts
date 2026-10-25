@@ -3,6 +3,8 @@ import type { RenderableBlock } from '../src/renderableBlocks';
 import { scanRenderableBlocks, spliceBlocks } from '../src/renderableBlocks';
 import { readImagePixelSize } from '../src/imageDimensions';
 import { prepareMermaidSource, prepareRenderSource } from './renderSource';
+import type { LayerBox, LayerCandidate } from './captureLayers';
+import { isTransparentColor, selectLayerStack } from './captureLayers';
 
 export interface SvgBinaryAsset {
     vaultPath: string;
@@ -57,6 +59,7 @@ type Snapshot = {
 const MAX_BLOCK_PIXELS = 8_000_000;
 const TOTAL_PIXEL_BUDGET = 40_000_000;
 const TOTAL_BYTE_BUDGET = 64 * 1024 * 1024;
+const SVG_NS = 'http://www.w3.org/2000/svg';
 const SVG_STYLE_PROPERTIES = [
     'fill', 'fill-opacity', 'fill-rule',
     'stroke', 'stroke-width', 'stroke-opacity', 'stroke-dasharray',
@@ -322,11 +325,9 @@ function pickRenderer(app: App): RenderFn | null {
 function snapshotSources(container: HTMLElement, options: SvgCaptureOptions): Snapshot | null {
     const svg = container.querySelector('svg');
     if (svg) {
-        const clone = svg.cloneNode(true) as SVGElement;
-        if (!options.allowForeignObject && clone.querySelector('foreignObject')) {
-            throw new CaptureFailure('foreignObject is not allowed');
-        }
-        sanitizeRenderedSvg(clone, svg);
+        const layers = collectLayerStack(svg);
+        if (layers) return snapshotLayerStack(layers, options);
+        const clone = cloneRenderedSvg(svg, options);
         const rect = svg.getBoundingClientRect();
         const size = measureSvg(svg, rect.width > 0 && rect.height > 0
             ? { widthPx: rect.width, heightPx: rect.height }
@@ -339,14 +340,7 @@ function snapshotSources(container: HTMLElement, options: SvgCaptureOptions): Sn
         const rect = canvas.getBoundingClientRect();
         const width = rect.width > 0 ? rect.width : canvas.width;
         const height = rect.height > 0 ? rect.height : canvas.height;
-        const copy = createEl('canvas');
-        const factor = Math.min(1, Math.sqrt(MAX_BLOCK_PIXELS / (canvas.width * canvas.height)));
-        copy.width = Math.max(1, Math.floor(canvas.width * factor));
-        copy.height = Math.max(1, Math.floor(canvas.height * factor));
-        const ctx = copy.getContext('2d');
-        if (!ctx) throw new CaptureFailure('2d context unavailable');
-        ctx.drawImage(canvas, 0, 0, copy.width, copy.height);
-        return { kind: 'canvas', displayWidthPx: width, displayHeightPx: height, source: copy };
+        return { kind: 'canvas', displayWidthPx: width, displayHeightPx: height, source: copyCanvas(canvas) };
     }
 
     const image = container.querySelector('img');
@@ -360,6 +354,124 @@ function snapshotSources(container: HTMLElement, options: SvgCaptureOptions): Sn
         };
     }
     return null;
+}
+
+function cloneRenderedSvg(svg: SVGElement, options: SvgCaptureOptions): SVGElement {
+    const clone = svg.cloneNode(true) as SVGElement;
+    if (!options.allowForeignObject && clone.querySelector('foreignObject')) {
+        throw new CaptureFailure('foreignObject is not allowed');
+    }
+    sanitizeRenderedSvg(clone, svg);
+    return clone;
+}
+
+function copyCanvas(canvas: HTMLCanvasElement): HTMLCanvasElement {
+    const copy = createEl('canvas');
+    const factor = Math.min(1, Math.sqrt(MAX_BLOCK_PIXELS / (canvas.width * canvas.height)));
+    copy.width = Math.max(1, Math.floor(canvas.width * factor));
+    copy.height = Math.max(1, Math.floor(canvas.height * factor));
+    const ctx = copy.getContext('2d');
+    if (!ctx) throw new CaptureFailure('2d context unavailable');
+    ctx.drawImage(canvas, 0, 0, copy.width, copy.height);
+    return copy;
+}
+
+type StackedLayer = { element: SVGElement | HTMLCanvasElement; box: LayerBox };
+
+/**
+ * Returns the layers stacked with the first SVG (its sibling SVGs and the
+ * canvases in its sibling elements, see captureLayers.ts), or null when the
+ * SVG stands alone. Sibling elements contribute only canvases, so SVG icons in
+ * toolbars such as Plotly's modebar never join the stack.
+ */
+function collectLayerStack(svg: SVGElement): { layers: StackedLayer[]; bounds: LayerBox } | null {
+    const parent = svg.parentElement;
+    if (!parent) return null;
+    const elements: (SVGElement | HTMLCanvasElement)[] = [];
+    for (const child of Array.from(parent.children)) {
+        const tag = child.tagName.toLowerCase();
+        if (tag === 'svg' || tag === 'canvas') {
+            elements.push(child as SVGElement | HTMLCanvasElement);
+        } else {
+            elements.push(...Array.from(child.querySelectorAll('canvas')));
+        }
+    }
+    if (elements.length < 2) return null;
+    const candidates: LayerCandidate[] = elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const visible = style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && Number.parseFloat(style.opacity || '1') > 0
+            && (element.tagName.toLowerCase() !== 'canvas'
+                || ((element as HTMLCanvasElement).width > 0 && (element as HTMLCanvasElement).height > 0));
+        return {
+            kind: element.tagName.toLowerCase() === 'canvas' ? 'canvas' : 'svg',
+            visible,
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+        };
+    });
+    const stack = selectLayerStack(candidates, elements.indexOf(svg));
+    if (stack.indices.length < 2) return null;
+    return {
+        layers: stack.indices.map((index) => ({ element: elements[index], box: candidates[index] })),
+        bounds: stack.bounds,
+    };
+}
+
+/**
+ * Draws each layer at its on-screen offset into one SVG: SVG layers as nested
+ * <svg> elements (vector, scaled by rasterScale like a single SVG) and canvas
+ * layers as PNG <image> elements.
+ */
+function snapshotLayerStack(
+    stack: { layers: StackedLayer[]; bounds: LayerBox },
+    options: SvgCaptureOptions
+): Snapshot {
+    const { bounds } = stack;
+    const root = document.createElementNS(SVG_NS, 'svg');
+    root.setAttribute('xmlns', SVG_NS);
+    root.setAttribute('width', String(bounds.width));
+    root.setAttribute('height', String(bounds.height));
+    root.setAttribute('viewBox', `0 0 ${bounds.width} ${bounds.height}`);
+    for (const { element, box } of stack.layers) {
+        const placement: Record<string, string> = {
+            x: String(box.left - bounds.left),
+            y: String(box.top - bounds.top),
+            width: String(box.width),
+            height: String(box.height),
+        };
+        if (element.tagName.toLowerCase() === 'canvas') {
+            const image = document.createElementNS(SVG_NS, 'image');
+            let href: string;
+            try {
+                href = copyCanvas(element as HTMLCanvasElement).toDataURL('image/png');
+            } catch (error) {
+                throw new CaptureFailure(`Canvas layer is not readable: ${String(error)}`);
+            }
+            image.setAttribute('href', href);
+            image.setAttribute('preserveAspectRatio', 'none');
+            for (const [name, value] of Object.entries(placement)) image.setAttribute(name, value);
+            root.appendChild(image);
+            continue;
+        }
+        // A nested <svg> is not a CSS box, so a background colour set on the
+        // layer (Plotly's paper_bgcolor) has to become a shape.
+        const background = getComputedStyle(element).backgroundColor;
+        if (!isTransparentColor(background)) {
+            const rect = document.createElementNS(SVG_NS, 'rect');
+            for (const [name, value] of Object.entries(placement)) rect.setAttribute(name, value);
+            rect.setAttribute('fill', background);
+            root.appendChild(rect);
+        }
+        const clone = cloneRenderedSvg(element as SVGElement, options);
+        for (const [name, value] of Object.entries(placement)) clone.setAttribute(name, value);
+        root.appendChild(clone);
+    }
+    return { kind: 'svg', displayWidthPx: bounds.width, displayHeightPx: bounds.height, svgText: svgToDataUri(root) };
 }
 
 async function rasterizeSnapshot(
